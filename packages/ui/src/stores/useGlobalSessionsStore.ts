@@ -56,6 +56,9 @@ type GlobalSessionsState = {
   upsertSessions: (sessions: Session[]) => void;
   removeSessions: (ids: Iterable<string>) => void;
   archiveSessions: (ids: Iterable<string>, archivedAt?: number) => void;
+  /** Clear `time.archived` on held sessions and move them back to the active
+      list. Sessions this store does not hold are left alone, never inserted. */
+  unarchiveSessions: (ids: Iterable<string>) => void;
   /** Drop every session from the previous runtime instance and go back to the
       unloaded state, so a fresh load runs against the new endpoint. */
   resetForRuntimeSwitch: () => void;
@@ -844,6 +847,36 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       const patch = applySessionMutations(
         state,
         movedSessions.map((session) => ({ type: 'upsert' as const, session })),
+      );
+      return {
+        ...patch,
+        ...mutationRevisionPatch(state, idSet),
+      };
+    });
+  },
+
+  unarchiveSessions: (ids) => {
+    const idSet = ids instanceof Set ? ids : new Set(ids);
+    if (idSet.size === 0) {
+      return;
+    }
+
+    set((state) => {
+      const restoredSessions: Session[] = [];
+      for (const sessionId of idSet) {
+        const session = state.entityById.get(sessionId);
+        if (!session?.time?.archived) continue;
+        const time = { ...session.time };
+        delete time.archived;
+        restoredSessions.push({ ...session, time });
+      }
+
+      if (restoredSessions.length === 0) {
+        return mutationRevisionPatch(state, idSet);
+      }
+      const patch = applySessionMutations(
+        state,
+        restoredSessions.map((session) => ({ type: 'upsert' as const, session })),
       );
       return {
         ...patch,

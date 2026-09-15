@@ -12,8 +12,10 @@ const DAY_MS = 86_400_000;
 export const RETENTION_KEEP_RECENT = 5;
 export const RETENTION_INTERVAL_MS = DAY_MS;
 
+// `time` is read optionally on purpose: a malformed session in the list must
+// fall out of retention as "never active", not crash the sidebar.
 const retentionTimestamp = (session: Session, onlyArchived: boolean): number => (
-  onlyArchived ? session.time.archived ?? 0 : session.time.updated ?? session.time.created
+  onlyArchived ? session.time?.archived ?? 0 : session.time?.updated ?? session.time?.created ?? 0
 );
 
 const isOlderThanCutoff = (session: Session, cutoff: number, onlyArchived: boolean): boolean => {
@@ -38,11 +40,11 @@ export function buildSessionRetentionCandidates({
   if (!Number.isFinite(cutoffDays) || cutoffDays < 1) return [];
   const cutoff = now - cutoffDays * DAY_MS;
   const byId = new Map(sessions.map((session) => [session.id, session]));
-  const sorted = sessions.filter((session) => Boolean(session.time.archived) === onlyArchived)
+  const sorted = sessions.filter((session) => Boolean(session.time?.archived) === onlyArchived)
     .sort((a, b) => retentionTimestamp(b, onlyArchived) - retentionTimestamp(a, onlyArchived));
   const protectedIds = new Set(sorted.slice(0, RETENTION_KEEP_RECENT).map((session) => session.id));
   for (const session of sessions) {
-    if (Boolean(session.time.archived) !== onlyArchived || getBtwSessionID(session) || session.id === currentSessionId
+    if (Boolean(session.time?.archived) !== onlyArchived || getBtwSessionID(session) || session.id === currentSessionId
       || activeSessionIds.has(session.id) || !isOlderThanCutoff(session, cutoff, onlyArchived)) {
       protectedIds.add(session.id);
     }
@@ -135,7 +137,7 @@ export async function runSessionRetentionCleanup({ force = false } = {}): Promis
       const state = useGlobalSessionsStore.getState();
       const session = state.entityById.get(id);
       if (!session) continue;
-      if (Boolean(session.time.archived) !== onlyArchived || getBtwSessionID(session) || session.id === useSessionUIStore.getState().currentSessionId
+      if (Boolean(session.time?.archived) !== onlyArchived || getBtwSessionID(session) || session.id === useSessionUIStore.getState().currentSessionId
         || useGlobalSessionStatusStore.getState().activeSessionIds.has(id)
         || !isOlderThanCutoff(session, now - settings.autoDeleteAfterDays * DAY_MS, onlyArchived)) continue;
       if (action === 'delete') {

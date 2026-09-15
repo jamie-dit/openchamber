@@ -280,3 +280,49 @@ describe('isGlobalSessionRecencyOnlyUpdate', () => {
     expect(isGlobalSessionRecencyOnlyUpdate(existing, reparented)).toBe(false);
   });
 });
+
+describe('useGlobalSessionsStore archive flags', () => {
+  const held = buildSession('Held', { id: 'ses_held', directory: '/project', time: { created: 1, updated: 2 } });
+
+  beforeEach(() => {
+    useGlobalSessionsStore.getState().resetForRuntimeSwitch();
+    useGlobalSessionsStore.getState().applySnapshot([held], []);
+  });
+
+  test('archiveSessions flags the held session in place and keeps every other field', () => {
+    useGlobalSessionsStore.getState().archiveSessions(['ses_held'], 42);
+
+    const state = useGlobalSessionsStore.getState();
+    expect(state.activeSessions).toEqual([]);
+    expect(state.archivedSessions).toEqual([{ ...held, time: { created: 1, updated: 2, archived: 42 } }]);
+    expect(state.entityById.get('ses_held')?.title).toBe('Held');
+  });
+
+  test('archiveSessions never inserts a session it does not hold', () => {
+    useGlobalSessionsStore.getState().archiveSessions(['ses_unknown'], 42);
+
+    const state = useGlobalSessionsStore.getState();
+    expect(state.archivedSessions).toEqual([]);
+    expect(state.entityById.has('ses_unknown')).toBe(false);
+    expect(state.activeSessions).toEqual([held]);
+  });
+
+  test('unarchiveSessions clears the flag and moves the session back to the active list', () => {
+    useGlobalSessionsStore.getState().archiveSessions(['ses_held'], 42);
+    useGlobalSessionsStore.getState().unarchiveSessions(['ses_held']);
+
+    const state = useGlobalSessionsStore.getState();
+    expect(state.archivedSessions).toEqual([]);
+    expect(state.activeSessions).toEqual([held]);
+    expect(state.entityById.get('ses_held')?.time).toEqual({ created: 1, updated: 2 });
+  });
+
+  test('unarchiveSessions is a no-op for unknown and already active sessions', () => {
+    useGlobalSessionsStore.getState().unarchiveSessions(['ses_unknown', 'ses_held']);
+
+    const state = useGlobalSessionsStore.getState();
+    expect(state.activeSessions).toEqual([held]);
+    expect(state.archivedSessions).toEqual([]);
+    expect(state.entityById.has('ses_unknown')).toBe(false);
+  });
+});

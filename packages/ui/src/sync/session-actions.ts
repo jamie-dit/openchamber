@@ -1363,13 +1363,16 @@ export async function archiveSession(sessionId: string, expectedRuntimeKey = get
     if (result.outcome !== "archived") {
       throw new Error(`archive failed: ${result.reason}`)
     }
-    const archived = result.archived.find((session) => session.id === sessionId)
+    const archived = result.archived.find((record) => record.id === sessionId)
     if (!archived) {
       throw new Error("archive failed: server did not return the archived session")
     }
     const snapshots = removeSessionFromLiveStores(sessionId, sessionDirectory)
     invalidateSessionLoads(sessionId, [...snapshots.map((snapshot) => snapshot.directory), sessionDirectory])
-    useGlobalSessionsStore.getState().upsertSession(archived)
+    // The server answers with its archive record, not a session. Flag the copy
+    // this client holds rather than upserting the record: a record stored as a
+    // session has no `time`, and the sidebar reads `time` on every session.
+    useGlobalSessionsStore.getState().archiveSessions([sessionId], archived.archivedAt ?? archivedAt)
     const ui = useSessionUIStore.getState()
     if (ui.currentSessionId === sessionId) ui.setCurrentSession(null)
     return true
@@ -1434,17 +1437,16 @@ export async function archiveSessions(
     }
 
     if (result.outcome === "archived") {
+      // The server's record carries the timestamp it actually wrote, which is
+      // what its stream echo will repeat; fall back to the one requested.
+      const archivedRecords = result.archived.map((record) => ({
+        id: record.id,
+        archivedAt: record.archivedAt ?? archivedAt,
+      }))
       releaseBulkArchiveEchoes(expectedRuntimeKey, batchIds)
-      registerBulkArchiveEchoes(
-        expectedRuntimeKey,
-        result.archived.flatMap((session) => (
-          session.time?.archived === undefined
-            ? []
-            : [{ id: session.id, archivedAt: session.time.archived }]
-        )),
-      )
-      commitArchivedSessions(result.archived, directory)
-      archivedIds.push(...result.archived.map((session) => session.id))
+      registerBulkArchiveEchoes(expectedRuntimeKey, archivedRecords)
+      commitArchivedSessions(archivedRecords, directory)
+      archivedIds.push(...archivedRecords.map((record) => record.id))
       failedIds.push(...result.failedIds)
       continue
     }
@@ -1531,16 +1533,28 @@ function planArchiveBatches(ids: string[]) {
  * the live directory stores, invalidate its cached messages, move it to the
  * archived bucket, and clear it if it was open — with the per-session store
  * notifications collapsed into one.
+ *
+ * The records are the server's archive entries, not sessions: the global store
+ * flags the sessions it already holds. One batch is stamped with one timestamp
+ * by the server, so grouping by it keeps this a single global write in
+ * practice while still honouring whatever the server actually wrote.
  */
-function commitArchivedSessions(sessions: Session[], directory: string): void {
-  if (sessions.length === 0) return
+function commitArchivedSessions(records: Array<{ id: string; archivedAt: number }>, directory: string): void {
+  if (records.length === 0) return
 
-  const ids = sessions.map((session) => session.id)
+  const ids = records.map((record) => record.id)
   const snapshots = removeSessionsFromLiveStores(ids, directory)
   const directories = [...snapshots.map((snapshot) => snapshot.directory), directory]
   for (const id of ids) invalidateSessionLoads(id, directories)
 
-  useGlobalSessionsStore.getState().upsertSessions(sessions)
+  const idsByArchivedAt = new Map<number, string[]>()
+  for (const record of records) {
+    const group = idsByArchivedAt.get(record.archivedAt)
+    if (group) group.push(record.id)
+    else idsByArchivedAt.set(record.archivedAt, [record.id])
+  }
+  const global = useGlobalSessionsStore.getState()
+  for (const [archivedAt, groupIds] of idsByArchivedAt) global.archiveSessions(groupIds, archivedAt)
 
   const ui = useSessionUIStore.getState()
   if (ui.currentSessionId && ids.includes(ui.currentSessionId)) ui.setCurrentSession(null)
@@ -1564,14 +1578,16 @@ export async function unarchiveSession(sessionId: string, expectedRuntimeKey = g
     if (result.outcome !== "restored") {
       throw new Error(`unarchive failed: ${result.reason}`)
     }
-    const restored = result.restored.find((session) => session.id === sessionId)
+    const restored = result.restored.find((record) => record.id === sessionId)
     if (!restored) {
       throw new Error("unarchive failed: server did not return the restored session")
     }
-    if (restored.time?.archived) {
+    if (restored.archivedAt) {
       throw new Error("unarchive failed: server kept the session archived")
     }
-    useGlobalSessionsStore.getState().upsertSession(restored)
+    // Same as archive: the answer is a record, so clear the flag on the held
+    // session instead of upserting a record that has no `time`.
+    useGlobalSessionsStore.getState().unarchiveSessions([sessionId])
     if (sessionDirectory) registerSessionDirectory(sessionId, sessionDirectory)
     return true
   } catch (error) {

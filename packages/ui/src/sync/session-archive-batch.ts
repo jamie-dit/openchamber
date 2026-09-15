@@ -15,24 +15,33 @@
  * back to a per-session path or report failure.
  */
 
-import type { JsonValue, Metadata, Session } from "@/lib/opencode/model"
+import type { JsonValue, Metadata } from "@/lib/opencode/model"
 import { z } from 'zod';
 
 import { runtimeFetch } from '@/lib/runtime-fetch';
 
 /**
- * The route answers with session records the OpenChamber server owns. Only the
- * identity this layer routes on is asserted here;
- * every other field is carried through to the stores exactly as the server
- * sent it, the same as for any other session response.
+ * The routes answer with the archive records the OpenChamber server owns: the
+ * session id and the timestamp it wrote (`null` once cleared). These are not
+ * sessions, and nothing here casts them to one. A record upserted as a session
+ * replaces the held copy with an object that has no `time`, which is what
+ * crashed the sidebar. Callers flag the session this client already holds
+ * instead.
  */
+const archivedRecordSchema = z.object({
+  id: z.string().min(1),
+  archivedAt: z.number().optional(),
+});
+
+export type SessionArchivedRecord = z.infer<typeof archivedRecordSchema>;
+
 const archiveResponseSchema = z.object({
-  archived: z.array(z.looseObject({ id: z.string().min(1) })),
+  archived: z.array(archivedRecordSchema),
   failedIds: z.array(z.string().min(1)),
 });
 
 export type SessionArchiveBatchResult =
-  | { outcome: 'archived'; archived: Session[]; failedIds: string[] }
+  | { outcome: 'archived'; archived: SessionArchivedRecord[]; failedIds: string[] }
   | { outcome: 'unavailable'; reason: string };
 
 export async function requestSessionArchiveBatch(
@@ -72,20 +81,25 @@ export async function requestSessionArchiveBatch(
 
   return {
     outcome: 'archived',
-    // SAFETY: the schema guarantees the non-empty string `id` this layer keys
-    // on; the remaining fields are the server's own session payload.
-    archived: parsed.data.archived as Session[],
+    archived: parsed.data.archived,
     failedIds: parsed.data.failedIds,
   };
 }
 
+const restoredRecordSchema = z.object({
+  id: z.string().min(1),
+  archivedAt: z.number().nullable().optional(),
+});
+
+export type SessionRestoredRecord = z.infer<typeof restoredRecordSchema>;
+
 const unarchiveResponseSchema = z.object({
-  restored: z.array(z.looseObject({ id: z.string().min(1) })),
+  restored: z.array(restoredRecordSchema),
   failedIds: z.array(z.string().min(1)),
 });
 
 export type SessionUnarchiveBatchResult =
-  | { outcome: 'restored'; restored: Session[]; failedIds: string[] }
+  | { outcome: 'restored'; restored: SessionRestoredRecord[]; failedIds: string[] }
   | { outcome: 'unavailable'; reason: string };
 
 /** Clears `time.archived` for a batch of sessions. Mirrors the archive route. */
@@ -119,9 +133,7 @@ export async function requestSessionUnarchiveBatch(ids: string[]): Promise<Sessi
 
   return {
     outcome: 'restored',
-    // SAFETY: same contract as the archive route — the schema guarantees the
-    // `id` this layer keys on, the rest is the server's session payload.
-    restored: parsed.data.restored as Session[],
+    restored: parsed.data.restored,
     failedIds: parsed.data.failedIds,
   };
 }

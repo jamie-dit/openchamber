@@ -85,6 +85,18 @@ describe('retention eligibility', () => {
       .toEqual(['leaf', 'child', 'root']);
   });
 
+  test('ignores a session without time instead of crashing', () => {
+    // A malformed record (the shape a stub upsert used to leave behind) must
+    // neither be selected nor take the whole candidate build down with it.
+    const broken = { id: 'broken', projectID: 'project', directory: '/retention-project' } as Session;
+    expect(candidates([session('old'), broken])).toEqual(['old']);
+    expect(candidates([session('old'), broken], 'archive')).toEqual(['old']);
+    expect(buildSessionRetentionCandidates({
+      sessions: [...recentArchived, archived('old-archive'), broken], cutoffDays: 30, currentSessionId: null,
+      action: 'delete', onlyArchived: true, activeSessionIds: new Set(), now,
+    })).toEqual(['old-archive']);
+  });
+
   test('rejects invalid retention periods and cycles', () => {
     for (const cutoffDays of [0, -1, NaN, Infinity]) {
       expect(buildSessionRetentionCandidates({
@@ -193,14 +205,19 @@ describe('retention execution', () => {
     expect(useUIStore.getState().autoDeleteLastRunAt).toBe(123);
   });
 
-  test('archives through the canonical action and retains the returned server record', async () => {
-    seed([session('old')]);
+  test('archives through the canonical action and flags the held session with the server timestamp', async () => {
+    const old = session('old');
+    seed([old]);
     useUIStore.setState({ sessionRetentionAction: 'archive' });
-    const archived = session('old', { time: { created: 1, updated: now, archived: now } });
+    // The server answers with its archive record, not a session.
     spyOn(sessionRoutes, 'requestSessionArchiveBatch')
-      .mockResolvedValue({ outcome: 'archived', archived: [archived], failedIds: [] });
+      .mockResolvedValue({ outcome: 'archived', archived: [{ id: 'old', archivedAt: now }], failedIds: [] });
     expect((await runSessionRetentionCleanup({ force: true })).completedIds).toEqual(['old']);
-    expect(useGlobalSessionsStore.getState().archivedSessions).toEqual([archived]);
+    const state = useGlobalSessionsStore.getState();
+    expect(state.archivedSessions).toEqual([{ ...old, time: { ...old.time, archived: now } }]);
+    expect(state.activeSessions.map((item) => item.id)).not.toContain('old');
+    // No record without `time` may reach the list the sidebar reads.
+    expect(state.archivedSessions.every((item) => item.time !== undefined)).toBe(true);
   });
 
   test('processes 850 hierarchical sessions with one confirmed delete per candidate', async () => {

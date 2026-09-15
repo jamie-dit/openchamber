@@ -24,6 +24,10 @@ let globalHasLoaded = true
 const deletedChatDirectories: string[] = []
 const globalUpsertedSessions: unknown[] = []
 const globalUpsertedSessionBatches: Session[][] = []
+// The archive routes answer with records, not sessions, so the actions flag
+// the held sessions through the store's archive methods rather than upserting.
+const globalArchiveCalls: Array<{ ids: string[]; archivedAt: number }> = []
+const globalUnarchiveCalls: string[][] = []
 const globalRemovedSessionIds: string[] = []
 // Sessions this client is holding. `archiveSessions` reads them to decide which
 // sessions can be archived by the server in one batch.
@@ -259,6 +263,12 @@ mock.module("@/stores/useGlobalSessionsStore", () => ({
       removeSessions: (ids: Iterable<string>) => {
         globalRemovedSessionIds.push(...ids)
       },
+      archiveSessions: (ids: Iterable<string>, archivedAt: number) => {
+        globalArchiveCalls.push({ ids: [...ids], archivedAt })
+      },
+      unarchiveSessions: (ids: Iterable<string>) => {
+        globalUnarchiveCalls.push([...ids])
+      },
     }),
   },
 }))
@@ -425,6 +435,8 @@ describe("moveSessionToDirectory", () => {
     registeredSessionDirectories.length = 0
     movedSessionDirectories.length = 0
     globalUpsertedSessions.length = 0
+    globalArchiveCalls.length = 0
+    globalUnarchiveCalls.length = 0
   })
 
   test("moves through the control plane and reconciles directory stores", async () => {
@@ -494,6 +506,8 @@ describe("confirmed session removal", () => {
   beforeEach(() => {
     replyCalls.length = 0
     globalUpsertedSessions.length = 0
+    globalArchiveCalls.length = 0
+    globalUnarchiveCalls.length = 0
     globalRemovedSessionIds.length = 0
     deletedCleanupIdentities.length = 0
     sessionDeleteError = null
@@ -707,7 +721,7 @@ describe("confirmed session removal", () => {
   test("moves the session to archived state after server confirmation", async () => {
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [{ id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } }], failedIds: [] },
+      body: { archived: [{ id: "session-a", archivedAt: 2 }], failedIds: [] },
     }
     const source = createStore({}, {
       session: [{ id: "session-a", directory: "/test/project", time: { created: 1 } } as Session],
@@ -717,13 +731,29 @@ describe("confirmed session removal", () => {
 
     expect(await archiveSession("session-a")).toBe(true)
     expect(source.getState().session).toEqual([])
-    expect((globalUpsertedSessions[0] as Session)?.time?.archived).toBe(2)
+    // The held session is flagged with the server's timestamp; the server's
+    // record itself never enters the store as a session.
+    expect(globalArchiveCalls).toEqual([{ ids: ["session-a"], archivedAt: 2 }])
+    expect(globalUpsertedSessions).toEqual([])
+  })
+
+  test("falls back to the requested timestamp when the server record carries none", async () => {
+    archiveBatchResponse = { status: 200, body: { archived: [{ id: "session-a" }], failedIds: [] } }
+    const source = createStore({}, {
+      session: [{ id: "session-a", directory: "/test/project", time: { created: 1 } } as Session],
+    })
+    const { archiveSession, setActionRefs } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", source]]), () => "/test/project")
+
+    expect(await archiveSession("session-a")).toBe(true)
+    expect(globalArchiveCalls).toEqual([{ ids: ["session-a"], archivedAt: openchamberRouteRequests[0].body.archivedAt as number }])
+    expect(globalUpsertedSessions).toEqual([])
   })
 
   test("rejects an archive response that arrives after a runtime switch", async () => {
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [{ id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } }], failedIds: [] },
+      body: { archived: [{ id: "session-a", archivedAt: 2 }], failedIds: [] },
     }
     const source = createStore({}, {
       session: [{ id: "session-a", directory: "/test/project", time: { created: 1 } } as Session],
@@ -741,18 +771,13 @@ describe("confirmed session removal", () => {
     // The stale response must not reconcile the runtime the user switched to.
     expect(source.getState().session.map((item) => item.id)).toEqual(["session-a"])
     expect(globalUpsertedSessions).toEqual([])
+    expect(globalArchiveCalls).toEqual([])
   })
 
   test("fails the whole batch when the runtime changes while the request is in flight", async () => {
     archiveBatchResponse = {
       status: 200,
-      body: {
-        archived: [
-          { id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } },
-          { id: "session-b", directory: "/test/project", time: { created: 1, archived: 2 } },
-        ],
-        failedIds: [],
-      },
+      body: { archived: [{ id: "session-a", archivedAt: 2 }, { id: "session-b", archivedAt: 2 }], failedIds: [] },
     }
     const source = createStore({}, {
       session: [
@@ -776,18 +801,13 @@ describe("confirmed session removal", () => {
     expect(result.failedIds).toEqual(["session-a", "session-b"])
     expect(source.getState().session.map((item) => item.id)).toEqual(["session-a", "session-b"])
     expect(globalUpsertedSessions).toEqual([])
+    expect(globalArchiveCalls).toEqual([])
   })
 
   test("archives every session when the runtime stays stable", async () => {
     archiveBatchResponse = {
       status: 200,
-      body: {
-        archived: [
-          { id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } },
-          { id: "session-b", directory: "/test/project", time: { created: 1, archived: 2 } },
-        ],
-        failedIds: [],
-      },
+      body: { archived: [{ id: "session-a", archivedAt: 2 }, { id: "session-b", archivedAt: 2 }], failedIds: [] },
     }
     const source = createStore({}, {
       session: [
@@ -805,6 +825,7 @@ describe("confirmed session removal", () => {
 
     expect(result).toEqual({ archivedIds: ["session-a", "session-b"], failedIds: [] })
     expect(source.getState().session).toEqual([])
+    expect(globalArchiveCalls).toEqual([{ ids: ["session-a", "session-b"], archivedAt: 2 }])
   })
 })
 
@@ -816,15 +837,15 @@ describe("archiving a batch through the server", () => {
     ...(metadata ? { metadata } : {}),
   } as unknown as Session)
 
-  const archivedSession = (id: string): Session => ({
-    id,
-    directory: "/test/project",
-    time: { created: 1, archived: 2 },
-  } as unknown as Session)
+  // What the OpenChamber server actually answers: its archive record, not a
+  // session (`archive-store.js` returns `{ id, archivedAt }`).
+  const archivedRecord = (id: string, archivedAt = 2) => ({ id, archivedAt })
 
   beforeEach(() => {
     replyCalls.length = 0
     globalUpsertedSessions.length = 0
+    globalArchiveCalls.length = 0
+    globalUnarchiveCalls.length = 0
     globalUpsertedSessionBatches.length = 0
     globalActiveSessions = []
     openchamberRouteRequests.length = 0
@@ -836,7 +857,7 @@ describe("archiving a batch through the server", () => {
     globalActiveSessions = [liveSession("session-a"), liveSession("session-b")]
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [archivedSession("session-a"), archivedSession("session-b")], failedIds: [] },
+      body: { archived: [archivedRecord("session-a"), archivedRecord("session-b")], failedIds: [] },
     }
     const source = createStore({}, { session: [liveSession("session-a"), liveSession("session-b")] })
     const { archiveSessions, setActionRefs } = await import("./session-actions")
@@ -851,15 +872,39 @@ describe("archiving a batch through the server", () => {
     // The point of the batch: no per-session SDK call, and one store write for
     // the whole set instead of one per session.
     expect(replyCalls.filter((call) => call.method === "session.rename")).toEqual([])
-    expect(globalUpsertedSessionBatches).toHaveLength(1)
+    expect(globalArchiveCalls).toEqual([{ ids: ["session-a", "session-b"], archivedAt: 2 }])
+    expect(globalUpsertedSessions).toEqual([])
     expect(source.getState().session).toEqual([])
     expect(source.getState().sessionRevision).toBe(1)
+  })
+
+  test("groups a batch by the timestamp the server wrote and never upserts its records", async () => {
+    globalActiveSessions = [liveSession("session-a"), liveSession("session-b"), liveSession("session-c")]
+    archiveBatchResponse = {
+      status: 200,
+      body: { archived: [archivedRecord("session-a", 5), archivedRecord("session-b", 5), { id: "session-c" }], failedIds: [] },
+    }
+    const source = createStore({}, { session: [liveSession("session-a"), liveSession("session-b"), liveSession("session-c")] })
+    const { archiveSessions, setActionRefs } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", source]]), () => "/test/project")
+
+    const result = await archiveSessions(["session-a", "session-b", "session-c"])
+
+    expect(result).toEqual({ archivedIds: ["session-a", "session-b", "session-c"], failedIds: [] })
+    // A record without a timestamp falls back to the one this client asked for.
+    const requestedAt = openchamberRouteRequests[0].body.archivedAt as number
+    expect(globalArchiveCalls).toEqual([
+      { ids: ["session-a", "session-b"], archivedAt: 5 },
+      { ids: ["session-c"], archivedAt: requestedAt },
+    ])
+    expect(globalUpsertedSessions).toEqual([])
+    expect(globalUpsertedSessionBatches).toEqual([])
   })
 
   test("batches sessions held only by the live directory store", async () => {
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [archivedSession("session-a")], failedIds: [] },
+      body: { archived: [archivedRecord("session-a")], failedIds: [] },
     }
     const source = createStore({}, { session: [liveSession("session-a")] })
     const { archiveSessions, setActionRefs } = await import("./session-actions")
@@ -878,7 +923,7 @@ describe("archiving a batch through the server", () => {
     globalActiveSessions = [liveSession("session-a"), liveSession("session-b")]
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [archivedSession("session-a")], failedIds: ["session-b"] },
+      body: { archived: [archivedRecord("session-a")], failedIds: ["session-b"] },
     }
     const source = createStore({}, { session: [liveSession("session-a"), liveSession("session-b")] })
     const { archiveSessions, setActionRefs } = await import("./session-actions")
@@ -927,7 +972,7 @@ describe("archiving a batch through the server", () => {
     globalActiveSessions = [liveSession("session-plain"), review, parentWithFork]
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [archivedSession("session-plain")], failedIds: [] },
+      body: { archived: [archivedRecord("session-plain")], failedIds: [] },
     }
     const source = createStore({}, { session: [liveSession("session-plain"), review, parentWithFork] })
     const { archiveSessions, setActionRefs } = await import("./session-actions")
@@ -949,7 +994,7 @@ describe("archiving a batch through the server", () => {
     globalActiveSessions = [liveSession("session-a")]
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [archivedSession("session-a")], failedIds: [] },
+      body: { archived: [archivedRecord("session-a")], failedIds: [] },
     }
     const source = createStore({}, { session: [liveSession("session-a")] })
     const { getRuntimeKey, switchRuntimeEndpoint } = await import("../lib/runtime-switch")
@@ -965,22 +1010,21 @@ describe("archiving a batch through the server", () => {
     expect(result).toEqual({ archivedIds: [], failedIds: ["session-a"] })
     expect(source.getState().session.map((item) => item.id)).toEqual(["session-a"])
     expect(globalUpsertedSessionBatches).toEqual([])
+    expect(globalArchiveCalls).toEqual([])
   })
 })
 
 describe("session restore (unarchive)", () => {
-  const restored = (id: string, directory: string, archived = 0) => ({
-    id,
-    projectID: "project-main",
-    directory,
-    time: { created: 1, updated: 1, archived },
-  })
+  // The unarchive route mirrors archive: `{ id, archivedAt: null }` per session.
+  const restored = (id: string, archivedAt: number | null = null) => ({ id, archivedAt })
 
   beforeEach(() => {
     replyCalls.length = 0
     registeredSessionDirectories.length = 0
     movedSessionDirectories.length = 0
     globalUpsertedSessions.length = 0
+    globalArchiveCalls.length = 0
+    globalUnarchiveCalls.length = 0
     globalActiveSessions.length = 0
     globalArchivedSessions.length = 0
     openchamberRouteRequests.length = 0
@@ -998,11 +1042,12 @@ describe("session restore (unarchive)", () => {
 
     expect(await unarchiveSession("session-a")).toBe(false)
     expect(globalUpsertedSessions).toEqual([])
+    expect(globalUnarchiveCalls).toEqual([])
     expect(registeredSessionDirectories).toEqual([])
   })
 
-  test("upserts the restored session and re-registers its directory after confirmation", async () => {
-    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-a", "/test/project")], failedIds: [] } }
+  test("clears the held session's archive flag and re-registers its directory after confirmation", async () => {
+    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-a")], failedIds: [] } }
     const source = createStore({}, { session: [] })
     const { unarchiveSession, setActionRefs } = await import("./session-actions")
     setActionRefs(createChildStores([["/test/project", source]]), () => "/test/project")
@@ -1011,12 +1056,14 @@ describe("session restore (unarchive)", () => {
     expect(openchamberRouteRequests).toHaveLength(1)
     expect(openchamberRouteRequests[0].path).toBe("/api/openchamber/sessions/unarchive")
     expect(openchamberRouteRequests[0].body).toMatchObject({ ids: ["session-a"] })
-    expect((globalUpsertedSessions[0] as Session)?.time?.archived).toBe(0)
+    // The record is not a session: the held session is unflagged, nothing is upserted.
+    expect(globalUnarchiveCalls).toEqual([["session-a"]])
+    expect(globalUpsertedSessions).toEqual([])
     expect(registeredSessionDirectories).toEqual([{ sessionID: "session-a", directory: "/test/project" }])
   })
 
   test("fails when the server keeps the session archived", async () => {
-    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-a", "/test/project", 2)], failedIds: [] } }
+    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-a", 2)], failedIds: [] } }
     const source = createStore({}, { session: [] })
     const { unarchiveSession, setActionRefs } = await import("./session-actions")
     setActionRefs(createChildStores([["/test/project", source]]), () => "/test/project")
@@ -1024,6 +1071,7 @@ describe("session restore (unarchive)", () => {
     // A silent server-side no-op must surface as a failure, not a success toast.
     expect(await unarchiveSession("session-a")).toBe(false)
     expect(globalUpsertedSessions).toEqual([])
+    expect(globalUnarchiveCalls).toEqual([])
     expect(registeredSessionDirectories).toEqual([])
   })
 
@@ -1039,7 +1087,7 @@ describe("session restore (unarchive)", () => {
 
   test("restores a worktree session into its own directory, not the parent project", async () => {
     const worktreeDirectory = "/projects/main/.worktrees/feature-a"
-    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-worktree", worktreeDirectory)], failedIds: [] } }
+    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-worktree")], failedIds: [] } }
 
     const { unarchiveSession, setActionRefs } = await import("./session-actions")
     setActionRefs(createChildStores([[worktreeDirectory, createStore({})]]), () => worktreeDirectory)
@@ -1047,11 +1095,11 @@ describe("session restore (unarchive)", () => {
     expect(await unarchiveSession("session-worktree")).toBe(true)
     expect(movedSessionDirectories).toEqual([])
     expect(registeredSessionDirectories).toEqual([{ sessionID: "session-worktree", directory: worktreeDirectory }])
-    expect((globalUpsertedSessions[0] as SessionWithDirectory).directory).toBe(worktreeDirectory)
+    expect(globalUnarchiveCalls).toEqual([["session-worktree"]])
   })
 
   test("rejects a restore response that arrives after a runtime switch", async () => {
-    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-a", "/test/project")], failedIds: [] } }
+    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-a")], failedIds: [] } }
     const source = createStore({}, { session: [] })
     const { getRuntimeKey, switchRuntimeEndpoint } = await import("../lib/runtime-switch")
     switchRuntimeEndpoint({ apiBaseUrl: "http://restore-runtime-a.test", runtimeKey: "restore-runtime-a" })
@@ -1073,8 +1121,8 @@ describe("session restore (unarchive)", () => {
       status: 200,
       body: {
         restored: [
-          restored("session-a", "/test/project"),
-          restored("session-b", "/test/project"),
+          restored("session-a"),
+          restored("session-b"),
         ],
         failedIds: [],
       },
@@ -1098,7 +1146,7 @@ describe("session restore (unarchive)", () => {
     // response is stale and session-c is never attempted, so both are reported
     // as failures instead of being silently dropped.
     expect(result).toEqual({ restoredIds: ["session-a"], failedIds: ["session-b", "session-c"] })
-    expect(globalUpsertedSessions).toHaveLength(1)
+    expect(globalUnarchiveCalls).toEqual([["session-a"]])
     // session-c must not reach the server after the runtime changed.
     expect(openchamberRouteRequests.map((request) => request.body.ids)).toEqual([["session-a"], ["session-b"]])
   })
@@ -1123,6 +1171,8 @@ describe("updateSessionTitle live state", () => {
   beforeEach(() => {
     replyCalls.length = 0
     globalUpsertedSessions.length = 0
+    globalArchiveCalls.length = 0
+    globalUnarchiveCalls.length = 0
     sessionRecords.clear()
   })
 
