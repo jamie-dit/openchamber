@@ -148,6 +148,63 @@ export const normalizeForwardedDirectoryHeaders = (headers) => {
   return headers;
 };
 
+/**
+ * OpenCode 2.x scopes most `/api/*` reads by `x-opencode-directory` and
+ * answers an empty 500 when that directory no longer exists on disk: it tries
+ * to initialise a project instance there before serving the route. Sessions
+ * outlive their directories (removed worktrees, moved checkouts), so the UI
+ * keeps sending the stale path for `/api/agent`, `/api/config`,
+ * `/api/form/request` and friends whenever such a session is opened.
+ *
+ * For safe reads the scope is dropped so upstream answers from its default
+ * location, the same answer it gives a request with no directory at all.
+ * Writes are left untouched: nothing may be created somewhere the user did
+ * not choose. Only "does not exist" is treated as stale; permission errors
+ * and anything else still reach upstream as-is.
+ */
+export const createStaleDirectoryHeaderGuard = ({
+  stat,
+  log = (message) => console.debug(message),
+  now = () => Date.now(),
+  noticeTtlMs = 60_000,
+} = {}) => {
+  const statPath = typeof stat === 'function' ? stat : null;
+  const noticed = new Map();
+
+  return async (req) => {
+    if (!statPath || !req?.headers) return false;
+
+    const method = typeof req.method === 'string' ? req.method.toUpperCase() : 'GET';
+    if (method !== 'GET' && method !== 'HEAD') return false;
+
+    normalizeForwardedDirectoryHeaders(req.headers);
+    const directory = req.headers['x-opencode-directory'];
+    if (typeof directory !== 'string' || directory.trim().length === 0) return false;
+
+    try {
+      await statPath(directory);
+      return false;
+    } catch (error) {
+      const code = error && typeof error === 'object' ? error.code : null;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return false;
+    }
+
+    delete req.headers['x-opencode-directory'];
+    delete req.headers['x-opencode-directory-encoding'];
+
+    const currentTime = now();
+    const lastNotice = noticed.get(directory);
+    if (lastNotice === undefined || currentTime - lastNotice >= noticeTtlMs) {
+      noticed.set(directory, currentTime);
+      if (noticed.size > 256) {
+        noticed.delete(noticed.keys().next().value);
+      }
+      log(`[proxy] directory no longer exists, forwarding ${method} ${req.url} without directory scope: ${directory}`);
+    }
+    return true;
+  };
+};
+
 const waitForSseDrain = (res, signal) => new Promise((resolve) => {
   if (signal?.aborted || res.writableEnded || res.destroyed) {
     resolve();
@@ -405,6 +462,9 @@ export const registerOpenCodeProxy = (app, deps) => {
   const FALLBACK_PROXY_TARGET = 'http://127.0.0.1:3902';
   const canonicalizeDirectoryQuery = createDirectoryQueryCanonicalizer({
     realpath: fs?.promises?.realpath?.bind(fs.promises),
+  });
+  const dropStaleDirectoryHeader = createStaleDirectoryHeaderGuard({
+    stat: fs?.promises?.stat?.bind(fs.promises),
   });
 
   const hasParsedBodyValue = (body) => {
@@ -1103,6 +1163,8 @@ export const registerOpenCodeProxy = (app, deps) => {
   // Best-effort fallback for stale clients still sending symlink paths.
   // Settings and project selection normalize at source; this cached async path
   // avoids blocking the proxy hot path on every directory-scoped request.
+  // The same pass drops a directory header that no longer exists on disk for
+  // safe reads, since OpenCode 2.x answers those with an empty 500 otherwise.
   app.use('/api', async (req, _res, next) => {
     try {
       const rewrittenUrl = await canonicalizeDirectoryQuery(req.url);
@@ -1111,6 +1173,11 @@ export const registerOpenCodeProxy = (app, deps) => {
       }
     } catch {
       // Pass through as-is if URL parsing or realpath resolution fails.
+    }
+    try {
+      await dropStaleDirectoryHeader(req);
+    } catch {
+      // Pass through as-is; upstream decides what to do with the directory.
     }
     next();
   });

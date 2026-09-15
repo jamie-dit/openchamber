@@ -677,4 +677,90 @@ describe('OpenCode proxy SSE forwarding', () => {
     await expect(response.json()).resolves.toMatchObject({ error: 'OpenCode upstream timed out' });
   });
 
+  it('serves directory-scoped reads for a directory that no longer exists instead of relaying a 500', async () => {
+    // OpenCode 2.x fails project initialisation for a missing directory and
+    // answers an empty 500. The fake upstream mirrors that so the proxy has to
+    // drop the stale scope for the request to succeed.
+    const seenDirectories = [];
+    const upstream = express();
+    upstream.use((req, res, next) => {
+      const directory = req.headers['x-opencode-directory'];
+      seenDirectories.push(directory ?? null);
+      if (typeof directory === 'string' && directory !== '/real/project') {
+        res.status(500).end();
+        return;
+      }
+      next();
+    });
+    upstream.get('/api/agent', (req, res) => {
+      res.json({ location: { directory: req.headers['x-opencode-directory'] ?? '/default' }, data: [] });
+    });
+    upstream.get('/api/form/request', (_req, res) => {
+      res.json({ data: [] });
+    });
+    upstream.post('/api/session', (_req, res) => {
+      res.status(500).end();
+    });
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+    const externalBaseUrl = `http://127.0.0.1:${upstreamPort}`;
+
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {
+        promises: {
+          stat: async (target) => {
+            if (target === '/real/project') return { isDirectory: () => true };
+            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          },
+        },
+      },
+      os: {},
+      path,
+      OPEN_CODE_READY_GRACE_MS: 0,
+      getRuntime: () => ({
+        openCodePort: upstreamPort,
+        openCodeBaseUrl: externalBaseUrl,
+        isOpenCodeReady: true,
+        openCodeNotReadySince: 0,
+        isRestartingOpenCode: false,
+      }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+    const proxyPort = proxyServer.address().port;
+
+    const stale = await fetch(`http://127.0.0.1:${proxyPort}/api/agent`, {
+      headers: { 'x-opencode-directory': '/gone/project' },
+    });
+    expect(stale.status).toBe(200);
+    await expect(stale.json()).resolves.toEqual({ location: { directory: '/default' }, data: [] });
+
+    const staleEncoded = await fetch(`http://127.0.0.1:${proxyPort}/api/form/request`, {
+      headers: {
+        'x-opencode-directory': encodeURIComponent('/gone/project'),
+        'x-opencode-directory-encoding': 'uri',
+      },
+    });
+    expect(staleEncoded.status).toBe(200);
+    await expect(staleEncoded.json()).resolves.toEqual({ data: [] });
+
+    const live = await fetch(`http://127.0.0.1:${proxyPort}/api/agent`, {
+      headers: { 'x-opencode-directory': '/real/project' },
+    });
+    expect(live.status).toBe(200);
+    await expect(live.json()).resolves.toEqual({ location: { directory: '/real/project' }, data: [] });
+
+    const write = await fetch(`http://127.0.0.1:${proxyPort}/api/session`, {
+      method: 'POST',
+      headers: { 'x-opencode-directory': '/gone/project', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(write.status).toBe(500);
+
+    expect(seenDirectories).toEqual([null, null, '/real/project', '/gone/project']);
+  });
+
 });

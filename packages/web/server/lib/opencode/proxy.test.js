@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createDirectoryQueryCanonicalizer,
   createOpenCodeProxyAgent,
+  createStaleDirectoryHeaderGuard,
   normalizeForwardedDirectoryHeaders,
 } from './proxy.js';
 
@@ -99,6 +100,93 @@ describe('normalizeForwardedDirectoryHeaders', () => {
     expect(headers).toEqual({
       'x-opencode-directory': '/Users/example/project%20literal',
     });
+  });
+});
+
+describe('createStaleDirectoryHeaderGuard', () => {
+  const missing = (code = 'ENOENT') => Object.assign(new Error(code), { code });
+  const statFor = (existing) => async (target) => {
+    if (existing.includes(target)) return { isDirectory: () => true };
+    throw missing();
+  };
+
+  it('drops the directory header from safe reads when the directory no longer exists', async () => {
+    const guard = createStaleDirectoryHeaderGuard({ stat: statFor(['/real/project']), log: () => {} });
+    const req = { method: 'GET', url: '/agent', headers: { 'x-opencode-directory': '/gone/project', accept: '*/*' } };
+
+    await expect(guard(req)).resolves.toBe(true);
+    expect(req.headers).toEqual({ accept: '*/*' });
+  });
+
+  it('decodes marked directory headers before checking the path', async () => {
+    const guard = createStaleDirectoryHeaderGuard({ stat: statFor(['/real/project']), log: () => {} });
+    const req = {
+      method: 'GET',
+      url: '/config',
+      headers: {
+        'x-opencode-directory': encodeURIComponent('/gone/project'),
+        'x-opencode-directory-encoding': 'uri',
+      },
+    };
+
+    await expect(guard(req)).resolves.toBe(true);
+    expect(req.headers).toEqual({});
+  });
+
+  it('keeps the header when the directory exists', async () => {
+    const guard = createStaleDirectoryHeaderGuard({ stat: statFor(['/real/project']), log: () => {} });
+    const req = { method: 'GET', url: '/agent', headers: { 'x-opencode-directory': '/real/project' } };
+
+    await expect(guard(req)).resolves.toBe(false);
+    expect(req.headers).toEqual({ 'x-opencode-directory': '/real/project' });
+  });
+
+  it('leaves writes alone so nothing is created outside the chosen directory', async () => {
+    const guard = createStaleDirectoryHeaderGuard({ stat: statFor([]), log: () => {} });
+    const req = { method: 'POST', url: '/session', headers: { 'x-opencode-directory': '/gone/project' } };
+
+    await expect(guard(req)).resolves.toBe(false);
+    expect(req.headers).toEqual({ 'x-opencode-directory': '/gone/project' });
+  });
+
+  it('only treats a missing path as stale, not other stat failures', async () => {
+    const guard = createStaleDirectoryHeaderGuard({
+      stat: async () => { throw missing('EACCES'); },
+      log: () => {},
+    });
+    const req = { method: 'GET', url: '/agent', headers: { 'x-opencode-directory': '/private/project' } };
+
+    await expect(guard(req)).resolves.toBe(false);
+    expect(req.headers).toEqual({ 'x-opencode-directory': '/private/project' });
+  });
+
+  it('does nothing without a stat implementation', async () => {
+    const guard = createStaleDirectoryHeaderGuard({});
+    const req = { method: 'GET', url: '/agent', headers: { 'x-opencode-directory': '/gone/project' } };
+
+    await expect(guard(req)).resolves.toBe(false);
+    expect(req.headers).toEqual({ 'x-opencode-directory': '/gone/project' });
+  });
+
+  it('logs each stale directory once per notice window', async () => {
+    const messages = [];
+    let clock = 0;
+    const guard = createStaleDirectoryHeaderGuard({
+      stat: statFor([]),
+      log: (message) => messages.push(message),
+      now: () => clock,
+      noticeTtlMs: 1000,
+    });
+    const request = () => guard({ method: 'GET', url: '/agent', headers: { 'x-opencode-directory': '/gone/project' } });
+
+    await request();
+    await request();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('/gone/project');
+
+    clock = 1000;
+    await request();
+    expect(messages).toHaveLength(2);
   });
 });
 
