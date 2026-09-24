@@ -17,7 +17,7 @@ export type SessionSidebarActivityItem = {
   getSecondaryMeta?: (sessionId: string) => SessionSidebarActivityItem['secondaryMeta'];
 };
 
-export type SessionSidebarActivityKey = 'chats' | 'active-now' | 'timeline';
+export type SessionSidebarActivityKey = 'in-progress' | 'chats' | 'active-now' | 'timeline';
 
 // 'timeline-chat' is a Chats row inside the timeline view: one line, no left
 // gutter, status and pin on the right like the three-line timeline rows.
@@ -90,6 +90,8 @@ export type SessionSidebarRowModelArgs = {
   sections: readonly ProjectSection[];
   authoritativeSections: readonly ProjectSection[];
   chatGroup: SessionGroup | null;
+  /** Running roots, rendered above every zone; the caller drops them from Chats, Recent and Timeline. */
+  inProgressItems?: readonly SessionSidebarActivityItem[];
   recentSections: readonly SessionSidebarActivitySection[];
   timelineItems?: readonly SessionSidebarActivityItem[];
   showRecentSection: boolean;
@@ -212,6 +214,8 @@ export const buildSessionSidebarRowModel = (args: SessionSidebarRowModelArgs): S
   const authoritativeRoots = [
     ...args.authoritativeSections.flatMap((section) => section.groups.flatMap((group) => group.sessions)),
     ...(args.chatGroup?.sessions ?? []),
+    // Claimed chats are no longer in the Chats group; keep their authority.
+    ...(args.inProgressItems ?? []).map((item) => item.node),
   ];
   const authorityStack = [...authoritativeRoots];
   while (authorityStack.length > 0) {
@@ -449,6 +453,22 @@ export const buildSessionSidebarRowModel = (args: SessionSidebarRowModelArgs): S
   };
 
   const timelineMode = args.viewMode === 'timeline';
+
+  const inProgressItems = args.inProgressItems ?? [];
+  if (inProgressItems.length > 0 && !appendActivityHeader('in-progress')) {
+    for (const item of inProgressItems) {
+      const indexed = indexNodes([item.node]);
+      const selectionPoolOffset = selectionDescendantIds.length;
+      selectionDescendantIds.push(...indexed.preorderIds);
+      const ownerKey = getSessionFolderOwnerKey(item.projectId, item.groupDirectory);
+      appendSessions({
+        nodes: [item.node], containerKey: 'activity:in-progress', projectId: item.projectId, groupDirectory: item.groupDirectory,
+        ownerKey, selectionScopeKey: ownerKey, archived: false, renderContext: timelineMode ? 'timeline' : 'recent',
+        secondaryMeta: item.secondaryMeta, getSecondaryMeta: item.getSecondaryMeta, indexedNodes: indexed, selectionPoolOffset,
+      });
+      if (search) searchMatchCount += 1;
+    }
+  }
 
   if (args.chatGroup) {
     const chatSearchData = args.groupSearchDataByGroup.get(args.chatGroup);

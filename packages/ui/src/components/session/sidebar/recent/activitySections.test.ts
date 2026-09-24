@@ -3,7 +3,7 @@ import type { Session } from '@/lib/opencode/model';
 import type { WorktreeMetadata } from '@/types/worktree';
 import { getGitHubPrStatusKey } from '@/stores/useGitHubPrStatusStore';
 import { resolveSessionPrLookupKey } from '../sessions/sessionNodeItemUtils';
-import { deriveRecentActivitySections, deriveRecentSessions } from './activitySections';
+import { deriveInProgressSessions, deriveRecentActivitySections, deriveRecentSessions } from './activitySections';
 import { resolveSidebarSessionLocations } from './sessionLocation';
 import type { SessionNode } from '../types';
 import type { DirectoryOwner } from '../sessions/sessionOwnership';
@@ -41,6 +41,58 @@ describe('deriveRecentSessions', () => {
     const recentSession = session('recent', { updated: RECENT });
 
     expect(deriveRecentSessions([oldSession, recentSession], new Set(), NOW)).toEqual([recentSession]);
+  });
+
+  test('leaves out sessions In progress already lists', () => {
+    const running = session('running', { updated: RECENT });
+    const settled = session('settled', { updated: RECENT });
+
+    expect(deriveRecentSessions([running, settled], new Set([running.id]), NOW, new Set([running.id])))
+      .toEqual([settled]);
+  });
+});
+
+describe('deriveInProgressSessions', () => {
+  test('lists a busy root and a root whose subagent is still running', () => {
+    const busy = session('busy');
+    const parent = session('parent');
+    const subagent = session('subagent', { parentID: parent.id });
+    const idle = session('idle');
+
+    expect(deriveInProgressSessions([busy, parent, subagent, idle], new Set([busy.id, subagent.id]), new Map([[parent.id, [subagent]]])))
+      .toEqual([busy, parent]);
+  });
+
+  test('ignores a running subagent below an archived child', () => {
+    const parent = session('parent');
+    const archived = session('archived', { parentID: parent.id, archived: NOW - 1 });
+    const grandchild = session('grandchild', { parentID: archived.id });
+    const childrenMap = new Map([[parent.id, [archived]], [archived.id, [grandchild]]]);
+
+    expect(deriveInProgressSessions([parent], new Set([archived.id, grandchild.id]), childrenMap)).toEqual([]);
+  });
+
+  test('leaves out a root waiting on the user, directly or through a descendant', () => {
+    const asking = session('asking');
+    const working = session('working');
+    const parent = session('parent');
+    const child = session('child', { parentID: parent.id });
+    const grandchild = session('grandchild', { parentID: child.id });
+    const childrenMap = new Map([[parent.id, [child]], [child.id, [grandchild]]]);
+
+    expect(deriveInProgressSessions(
+      [asking, working, parent],
+      new Set([asking.id, working.id, parent.id]),
+      childrenMap,
+      new Set([asking.id, grandchild.id]),
+    )).toEqual([working]);
+  });
+
+  test('never lists archived roots or subagents as roots', () => {
+    const archived = session('archived', { archived: NOW - 1 });
+    const child = session('child', { parentID: 'parent' });
+
+    expect(deriveInProgressSessions([archived, child], new Set([archived.id, child.id]), new Map())).toEqual([]);
   });
 });
 

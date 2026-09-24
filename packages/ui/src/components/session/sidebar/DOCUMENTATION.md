@@ -9,7 +9,7 @@ kept at this root in `types.ts` and `utils.tsx`.
 - `projects/` owns project zones, grouping, ordering, scroller behavior, project
   view state, repository state, and worktree presentation.
 - `sessions/` owns session rows, row actions, expansion, ownership, and activity indicators. A collapsed group or folder shows one indicator for its hidden sessions: a pending permission (shield) outranks a pending question, which outranks a running turn, which outranks unread. Pending requests are read from the cross-directory `global-blocking-requests` index, so a project never opened in this launch still shows them; running and unread come from the global status index and the notification store.
-- `recent/` owns Recent and managed Chats activity projections.
+- `recent/` owns In progress, Recent, and managed Chats activity projections.
 - `folders/` owns folder DnD, bulk actions, archived folders, and folder UI.
 - `sessionSidebarRowModel.ts` owns the ordered, mode-neutral projection for
   Chats, Recent, projects, groups, folders, sessions, status notices, empty
@@ -82,6 +82,19 @@ display can be all projects or one selected project. The mobile sessions sheet
 project tree, with no Recent projection. VS Code excludes worktrees and managed
 Chats, while retaining its workspace-scoped grouped list and inline archived
 buckets.
+
+In progress renders above every other zone, in both view modes and in the
+mobile sessions sheet. VS Code has none, and single-project display hides it
+outside the timeline, as it hides Recent. It lists non-archived root sessions from projects and managed
+Chats whose own turn or any active subagent is running, from the live
+`global-session-status` index. A session with a permission or question pending
+on itself or a descendant, from `global-blocking-requests`, stays out: OpenCode
+keeps a parked execution active, but the user has to answer it. The section is
+hidden when empty. While a session runs it leaves Recent, Chats and the
+timeline, so a running chat also leaves its Chats folder; the Chats header and
+New chat stay. Project trees still list it. Mobile rows show their project.
+Sidebar search filters it with the Recent rule; mobile search keeps its flat
+match list.
 
 Hosted mobile and Capacitor use their separate `MobileSessionsSheet` renderer.
 The shared directory-cache rules apply there, but this sidebar virtualizer does not.

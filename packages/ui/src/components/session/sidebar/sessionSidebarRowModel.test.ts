@@ -105,6 +105,24 @@ describe('buildSessionSidebarRowModel', () => {
     ]);
   });
 
+  test('renders In progress above Chats and Recent and keeps a claimed chat selectable', () => {
+    const input = args([]);
+    input.chatGroup = group([node('idle-chat')], { id: 'managed-chats', directory: '/chats' });
+    input.inProgressItems = [timelineItem('running-chat', { projectId: null, groupDirectory: '/chats', secondaryMeta: null })];
+    input.recentSections = [{ key: 'active-now', items: [timelineItem('recent')] }];
+    input.showRecentSection = true;
+
+    const model = buildSessionSidebarRowModel(input);
+
+    expect(model.rows.flatMap((row) => row.kind === 'activity-header' ? [row.activityKey] : []))
+      .toEqual(['in-progress', 'chats', 'active-now']);
+    expect(model.rows[1]).toMatchObject({ kind: 'session', renderContext: 'recent', node: { session: { id: 'running-chat' } } });
+    expect(model.sessionById.has('running-chat')).toBe(true);
+
+    input.collapsedActivities = new Set(['in-progress']);
+    expect(buildSessionSidebarRowModel(input).sessionById.has('running-chat')).toBe(true);
+  });
+
   test('uses occurrence keys while retaining duplicate session IDs in logical order', () => {
     const repeated = node('same-session');
     const input = args([project([group([repeated])])]);

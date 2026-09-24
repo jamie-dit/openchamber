@@ -32,6 +32,7 @@ import { CSS } from '@dnd-kit/utilities';
 
 import { DirectoryExplorerDialog } from '@/components/session/DirectoryExplorerDialog';
 import { Icon } from '@/components/icon/Icon';
+import type { IconName } from '@/components/icon/icons';
 import { NewWorktreeDialog } from '@/components/session/NewWorktreeDialog';
 import { Button } from '@/components/ui/button';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
@@ -40,7 +41,7 @@ import { toast } from '@/components/ui';
 import { getProjectLabel, normalizePath } from './mobilePaths';
 import { SessionSearchInput } from '@/components/session/SessionSearchInput';
 import { CHAT_DRAFT_PROJECT_ID, isChatDirectoryPath } from '@/lib/chatDirectories';
-import { getDescendantIds, partitionSidebarSessions } from '@/components/session/sidebar/list/sessionCollection';
+import { getDescendantIds, partitionSidebarSessions, useInProgressSessionCollection } from '@/components/session/sidebar/list/sessionCollection';
 import { sortProjectsByOrder } from '@/components/session/sidebar/list/projectSort';
 import { collectSessionSubtreeIds, runSessionSubtreeAction, type SessionSubtreeAction } from '@/components/session/sidebar/sessions/sessionSubtreeActions';
 import { createSessionOwnershipIndex } from '@/components/session/sidebar/sessions/sessionOwnership';
@@ -135,7 +136,8 @@ const VIEW_MODE_OPTIONS = [
 
 type SidebarViewMode = (typeof VIEW_MODE_OPTIONS)[number][0];
 
-// Pseudo-project key for the collapsible "recent" group's persisted expansion.
+// Pseudo-project key for the collapsible In progress section's persisted expansion.
+const IN_PROGRESS_SECTION_ID = 'openchamber:in-progress';
 
 type ProjectMeta = {
   id: string;
@@ -262,6 +264,37 @@ const NewSessionIconButton: React.FC<{
     <Icon name="add" className="size-4" />
   </button>
 );
+
+// Collapsible header shared by the In progress and Chats sections.
+const SectionHeader: React.FC<{
+  icon: IconName;
+  label: string;
+  count: number;
+  expanded: boolean;
+  onToggle: () => void;
+  children?: React.ReactNode;
+}> = ({ icon, label, count, expanded, onToggle, children }) => {
+  const { t } = useI18n();
+  return (
+    <div className="flex min-h-12 w-full items-center">
+      <button
+        type="button"
+        className="flex min-h-12 min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        aria-label={expanded ? t('sessions.sidebar.group.collapseAria', { label }) : t('sessions.sidebar.group.expandAria', { label })}
+        style={{ touchAction: 'manipulation' }}
+      >
+        <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-[var(--surface-muted)] text-muted-foreground">
+          <Icon name={icon} className="size-4" />
+        </span>
+        <span className="block min-w-0 flex-1 truncate typography-ui-label font-semibold text-foreground">{label}</span>
+        <span className="shrink-0 typography-micro text-muted-foreground tabular-nums">{count}</span>
+      </button>
+      {children}
+    </div>
+  );
+};
 
 const SessionRow: React.FC<{
   session: Session;
@@ -873,17 +906,44 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
     [],
     authoritativeProjects,
   ), [authoritativeProjects, projectSessions, projectsMeta]);
+  // Running sessions lead the list, as on desktop; the bucket keeps their subagents so rows expand.
+  const activityCandidates = React.useMemo(() => [...projectSessions, ...chatSessions], [chatSessions, projectSessions]);
+  const inProgressSessions = useInProgressSessionCollection({
+    enabled: presented,
+    childrenMap: childrenBySessionId,
+    pinnedSessionIds,
+    sessionOrderRanks,
+    sessions: activityCandidates,
+  });
+  const inProgressBucket = React.useMemo<WorktreeBucket>(() => {
+    const bucketSessions: Session[] = [];
+    const seen = new Set<string>();
+    const visit = (session: Session): void => {
+      if (seen.has(session.id)) return;
+      seen.add(session.id);
+      bucketSessions.push(session);
+      for (const child of childrenBySessionId.get(session.id) ?? []) visit(child);
+    };
+    inProgressSessions.forEach(visit);
+    return { key: IN_PROGRESS_SECTION_ID, label: '', path: '', worktree: null, sessions: bucketSessions };
+  }, [childrenBySessionId, inProgressSessions]);
+  const inProgressExpanded = projectExpandedMap[IN_PROGRESS_SECTION_ID] ?? true;
+  const claimedSessionIds = React.useMemo(() => new Set(inProgressBucket.sessions.map((session) => session.id)), [inProgressBucket]);
+  const unclaimedChatSessions = React.useMemo(
+    () => chatSessions.filter((session) => !claimedSessionIds.has(session.id)),
+    [chatSessions, claimedSessionIds],
+  );
   const chatsBucket = React.useMemo<WorktreeBucket>(() => ({
     key: CHAT_DRAFT_PROJECT_ID,
     label: '',
     path: '',
     worktree: null,
-    sessions: orderSessionsByLifecycleScopes(chatSessions, pinnedSessionIds, sessionOrderRanks),
-  }), [chatSessions, pinnedSessionIds, sessionOrderRanks]);
+    sessions: orderSessionsByLifecycleScopes(unclaimedChatSessions, pinnedSessionIds, sessionOrderRanks),
+  }), [pinnedSessionIds, sessionOrderRanks, unclaimedChatSessions]);
   const chatsBucketKey = `${CHAT_DRAFT_PROJECT_ID}::${CHAT_DRAFT_PROJECT_ID}`;
   const chatRootCount = React.useMemo(
-    () => chatSessions.filter((session) => !getParentId(session)).length,
-    [chatSessions],
+    () => unclaimedChatSessions.filter((session) => !getParentId(session)).length,
+    [unclaimedChatSessions],
   );
 
   const normalizedQuery = query.trim().toLowerCase();
@@ -1023,6 +1083,8 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
       alwaysVisibleIds?: Set<string>;
       /** Timeline chats: flush-left rows with the status dot on the right. */
       statusOnRight?: boolean;
+      /** Roots show where they live, for sections that mix projects. */
+      getContextLabel?: (session: Session) => string;
     },
   ) => {
     const pageSize = options?.pageSize ?? SESSIONS_PER_BUCKET;
@@ -1068,6 +1130,7 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
             session={session}
             active={currentSessionId === session.id}
             indent={rowIndent}
+            contextLabel={rowIndent === indent ? options?.getContextLabel?.(session) : undefined}
             hasChildren={hasChildren}
             expanded={expanded}
             onToggleChildren={hasChildren ? () => toggleParent(session.id) : undefined}
@@ -1109,6 +1172,14 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
   const toggleProject = (projectId: string, currentlyExpanded: boolean) => {
     setProjectExpanded(projectId, !currentlyExpanded);
     resetProjectVisibleCounts(projectId);
+  };
+
+  const toggleSection = (sectionId: string, currentlyExpanded: boolean) => {
+    if (revealedRowId) {
+      handleRowKeyRevealedChange(revealedRowId, false);
+      return;
+    }
+    toggleProject(sectionId, currentlyExpanded);
   };
 
   const toggleWorktree = (projectId: string, bucketKey: string, currentlyExpanded: boolean) => {
@@ -1342,13 +1413,13 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
   const timelineEntries = React.useMemo<TimelineEntry[]>(() => {
     if (!timelineActive) return [];
     const roots = projectSessions.filter(
-      (session) => !getParentId(session) && timelineContextById.has(session.id),
+      (session) => !getParentId(session) && timelineContextById.has(session.id) && !claimedSessionIds.has(session.id),
     );
     return orderSessionsByLifecycleScopes(roots, pinnedSessionIds, sessionOrderRanks).flatMap((session) => {
       const context = timelineContextById.get(session.id);
       return context ? [{ session, project: context.project, branch: context.branch }] : [];
     });
-  }, [pinnedSessionIds, projectSessions, sessionOrderRanks, timelineActive, timelineContextById]);
+  }, [claimedSessionIds, pinnedSessionIds, projectSessions, sessionOrderRanks, timelineActive, timelineContextById]);
 
   const revealMoreTimelineSessions = React.useCallback(() => {
     setTimelineVisibleCount((current) => revealNextTimelinePage(current, timelineEntries.length));
@@ -1592,40 +1663,38 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
             </div>
           ) : (
             <div className="flex flex-col">
+              {inProgressSessions.length > 0 ? (
+                <section>
+                  <SectionHeader
+                    icon="hourglass"
+                    label={t('mobile.sessions.section.inProgress')}
+                    count={inProgressSessions.length}
+                    expanded={inProgressExpanded}
+                    onToggle={() => toggleSection(IN_PROGRESS_SECTION_ID, inProgressExpanded)}
+                  />
+                  {inProgressExpanded ? (
+                    <div className="pb-2">
+                      {renderBucketSessions(
+                        `${IN_PROGRESS_SECTION_ID}::${IN_PROGRESS_SECTION_ID}`,
+                        inProgressBucket,
+                        timelineActive ? TIMELINE_CHAT_INDENT : PROJECT_SESSION_INDENT,
+                        { statusOnRight: timelineActive, getContextLabel: buildSessionContextLabel },
+                      )}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
               {(() => {
                 const chatsExpanded = projectExpandedMap[CHAT_DRAFT_PROJECT_ID] ?? true;
-                const chatsLabel = t('mobile.sessions.section.chats');
                 return (
                   <section>
-                    <div className="flex min-h-12 w-full items-center">
-                      <button
-                        type="button"
-                        className="flex min-h-12 min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-                        onClick={() => {
-                          if (revealedRowId) {
-                            handleRowKeyRevealedChange(revealedRowId, false);
-                            return;
-                          }
-                          toggleProject(CHAT_DRAFT_PROJECT_ID, chatsExpanded);
-                        }}
-                        aria-expanded={chatsExpanded}
-                        aria-label={
-                          chatsExpanded
-                            ? t('sessions.sidebar.group.collapseAria', { label: chatsLabel })
-                            : t('sessions.sidebar.group.expandAria', { label: chatsLabel })
-                        }
-                        style={{ touchAction: 'manipulation' }}
-                      >
-                        <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-[var(--surface-muted)] text-muted-foreground">
-                          <Icon name="chat-4" className="size-4" />
-                        </span>
-                        <span className="block min-w-0 flex-1 truncate typography-ui-label font-semibold text-foreground">
-                          {chatsLabel}
-                        </span>
-                        <span className="shrink-0 typography-micro text-muted-foreground tabular-nums">
-                          {chatRootCount}
-                        </span>
-                      </button>
+                    <SectionHeader
+                      icon="chat-4"
+                      label={t('mobile.sessions.section.chats')}
+                      count={chatRootCount}
+                      expanded={chatsExpanded}
+                      onToggle={() => toggleSection(CHAT_DRAFT_PROJECT_ID, chatsExpanded)}
+                    >
                       {/* Same "+" every project header carries, so a new chat is
                           reachable from its own section, not only the title bar. */}
                       {!editingOrder ? (
@@ -1635,7 +1704,7 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
                           onClick={handleStartNewChat}
                         />
                       ) : null}
-                    </div>
+                    </SectionHeader>
                     {chatsExpanded ? (
                       <div className="pb-2">
                         {chatsBucket.sessions.length > 0 ? (

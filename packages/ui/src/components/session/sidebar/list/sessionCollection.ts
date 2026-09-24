@@ -9,8 +9,9 @@ import {
 import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
 import { useSessionPinnedStore } from '@/stores/useSessionPinnedStore';
 import { useGlobalSessionStatusStore } from '@/sync/global-session-status';
+import { useGlobalBlockingRequestsStore, type PendingBlockingRequests } from '@/sync/global-blocking-requests';
 import { resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
-import { deriveRecentSessions } from '../recent/activitySections';
+import { deriveInProgressSessions, deriveRecentSessions } from '../recent/activitySections';
 import { normalizePath } from '../utils';
 import { isChatDirectoryPath } from '@/lib/chatDirectories';
 import { isBtwSession } from '@/lib/sessionBtwMetadata';
@@ -329,12 +330,50 @@ export const useSessionProjectCollection = ({
   };
 };
 
+type UseInProgressSessionCollectionArgs = {
+  enabled: boolean;
+  childrenMap: ReadonlyMap<string, readonly Session[]>;
+  pinnedSessionIds: Set<string>;
+  sessionOrderRanks: ReadonlyMap<string, number>;
+  /** Project roots plus managed Chats. */
+  sessions: readonly Session[];
+};
+
+const EMPTY_BLOCKING_REQUESTS: ReadonlyMap<string, PendingBlockingRequests> = new Map();
+const EMPTY_SESSIONS: Session[] = [];
+
+// Running comes from the live status index; waiting from the cross-directory blocking-request index.
+export const useInProgressSessionCollection = ({
+  enabled,
+  childrenMap,
+  pinnedSessionIds,
+  sessionOrderRanks,
+  sessions,
+}: UseInProgressSessionCollectionArgs): Session[] => {
+  const activeSessionIds = useGlobalSessionStatusStore(React.useCallback(
+    (state) => enabled ? state.activeSessionIds : EMPTY_ACTIVE_SESSION_IDS,
+    [enabled],
+  ));
+  const blockingBySession = useGlobalBlockingRequestsStore(React.useCallback(
+    (state) => enabled ? state.bySession : EMPTY_BLOCKING_REQUESTS,
+    [enabled],
+  ));
+  return React.useMemo(() => {
+    if (!enabled) return EMPTY_SESSIONS;
+    const inProgress = deriveInProgressSessions(sessions, activeSessionIds, childrenMap, new Set(blockingBySession.keys()));
+    if (inProgress.length === 0) return EMPTY_SESSIONS;
+    return orderSessionsByLifecycleScopes(inProgress, pinnedSessionIds, sessionOrderRanks);
+  }, [activeSessionIds, blockingBySession, childrenMap, enabled, pinnedSessionIds, sessionOrderRanks, sessions]);
+};
+
 type UseRecentSessionCollectionArgs = {
   enabled: boolean;
   isVSCode: boolean;
   pinnedSessionIds: Set<string>;
   sessionOrderRanks: ReadonlyMap<string, number>;
   sessions: Session[];
+  /** Sessions In progress lists; Recent leaves them out. */
+  claimedSessionIds?: ReadonlySet<string>;
 };
 
 // Recent is a separate high-frequency collection view. Its active membership
@@ -345,6 +384,7 @@ export const useRecentSessionCollection = ({
   pinnedSessionIds,
   sessionOrderRanks,
   sessions,
+  claimedSessionIds,
 }: UseRecentSessionCollectionArgs): Session[] => {
   const activeSessionIdSet = useGlobalSessionStatusStore(
     React.useCallback(
@@ -357,9 +397,9 @@ export const useRecentSessionCollection = ({
     if (!enabled || isVSCode) return [];
     countSyncPerformance('recentCandidatesVisited', sessions.length);
     return orderSessionsByLifecycleScopes(
-      deriveRecentSessions(sessions, activeSessionIdSet),
+      deriveRecentSessions(sessions, activeSessionIdSet, Date.now(), claimedSessionIds),
       pinnedSessionIds,
       sessionOrderRanks,
     );
-  }, [activeSessionIdSet, enabled, isVSCode, pinnedSessionIds, sessionOrderRanks, sessions]);
+  }, [activeSessionIdSet, claimedSessionIds, enabled, isVSCode, pinnedSessionIds, sessionOrderRanks, sessions]);
 };

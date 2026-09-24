@@ -49,6 +49,9 @@ const getSessionUpdatedAt = (session: Session): number => {
   return 0;
 };
 
+const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
+const EMPTY_SESSIONS: Session[] = [];
+
 // Recent contains non-archived root sessions that are active now or were
 // updated within the retention window. The caller applies shared lifecycle
 // ordering after this membership filter; batching ("Show more") handles long
@@ -57,14 +60,42 @@ export const deriveRecentSessions = (
   sessions: Session[],
   activeSessionIds: ReadonlySet<string>,
   now = Date.now(),
+  claimedSessionIds: ReadonlySet<string> = EMPTY_SESSION_IDS,
 ): Session[] => {
   const minUpdatedAt = now - RECENT_SESSION_MAX_AGE_MS;
   return sessions.filter((session) => {
-    if (isArchivedSession(session) || isSubtaskSession(session)) {
+    if (isArchivedSession(session) || isSubtaskSession(session) || claimedSessionIds.has(session.id)) {
       return false;
     }
     return activeSessionIds.has(session.id) || getSessionUpdatedAt(session) >= minUpdatedAt;
   });
+};
+
+// Skips archived branches, unlike useSessionTurnActive's spinner rule (any active subagent).
+const subtreeHas = (
+  childrenMap: ReadonlyMap<string, readonly Session[]>,
+  session: Session,
+  sessionIds: ReadonlySet<string>,
+): boolean => {
+  if (sessionIds.has(session.id)) return true;
+  for (const child of childrenMap.get(session.id) ?? EMPTY_SESSIONS) {
+    if (!isArchivedSession(child) && subtreeHas(childrenMap, child, sessionIds)) return true;
+  }
+  return false;
+};
+
+// In progress: root sessions running themselves or through a subagent, unless waiting on the user.
+export const deriveInProgressSessions = (
+  sessions: readonly Session[],
+  activeSessionIds: ReadonlySet<string>,
+  childrenMap: ReadonlyMap<string, readonly Session[]>,
+  waitingSessionIds: ReadonlySet<string> = EMPTY_SESSION_IDS,
+): Session[] => {
+  if (activeSessionIds.size === 0) return EMPTY_SESSIONS;
+  return sessions.filter((session) => !isArchivedSession(session)
+    && !isSubtaskSession(session)
+    && subtreeHas(childrenMap, session, activeSessionIds)
+    && !subtreeHas(childrenMap, session, waitingSessionIds));
 };
 
 const attachRecentWorktrees = (

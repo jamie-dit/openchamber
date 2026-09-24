@@ -10,7 +10,7 @@ import type { SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { useArchivedAutoFolders } from '../folders/useArchivedAutoFolders';
 import { ProjectSessionSelectionEffect } from '../projects/useProjectSessionSelection';
 import type { WorktreeMetadata } from '@/types/worktree';
-import { buildActiveSessionNode, useRecentSessionCollection, useSessionProjectCollection } from './sessionCollection';
+import { buildActiveSessionNode, useInProgressSessionCollection, useRecentSessionCollection, useSessionProjectCollection } from './sessionCollection';
 import { useChildStoreManager } from '@/sync/sync-context';
 import { useGlobalSyncStore } from '@/sync/global-sync-store';
 import { createSessionOwnershipIndex } from '../sessions/sessionOwnership';
@@ -164,12 +164,29 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
   const supportsSingleProjectMode = !topology.isVSCode && !isCapacitorApp();
   const singleProjectMode = supportsSingleProjectMode && projectDisplayMode === 'single';
   const timelineMode = view.sidebarViewMode === 'timeline' && !topology.isVSCode;
+  const activityCandidates = React.useMemo(
+    () => [...collection.rootSessions, ...collection.chatSessions],
+    [collection.chatSessions, collection.rootSessions],
+  );
+  const inProgressSessions = useInProgressSessionCollection({
+    // Hidden in single-project display, like Recent; the timeline ignores that display.
+    enabled: !topology.isVSCode && (timelineMode || !singleProjectMode),
+    childrenMap: collection.childrenMap,
+    pinnedSessionIds: collection.pinnedSessionIds,
+    sessionOrderRanks: collection.sessionOrderRanks,
+    sessions: activityCandidates,
+  });
+  const inProgressSessionIds = React.useMemo(
+    () => new Set(inProgressSessions.map((session) => session.id)),
+    [inProgressSessions],
+  );
   const recentSessions = useRecentSessionCollection({
     enabled: showRecentSection && !singleProjectMode && !timelineMode,
     isVSCode: topology.isVSCode,
     pinnedSessionIds: collection.pinnedSessionIds,
     sessionOrderRanks: collection.sessionOrderRanks,
     sessions: collection.rootSessions,
+    claimedSessionIds: inProgressSessionIds,
   });
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [editingRowKey, setEditingRowKey] = React.useState<string | null>(null);
@@ -226,11 +243,12 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       folderScopeKey: chatsRoot,
       folderScopes,
       draftTarget: 'chat',
+      // Running chats show under In progress; filtering here keeps the chats search data in step.
       sessions: collection.chatSessions
-        .filter((session) => !session.time?.archived && isRootSession(session))
+        .filter((session) => !session.time?.archived && isRootSession(session) && !inProgressSessionIds.has(session.id))
         .map((session) => buildActiveSessionNode(collection.childrenMap, session)),
     };
-  }, [collection.chatSessions, collection.childrenMap, topology.isVSCode, view.homeDirectory]);
+  }, [collection.chatSessions, collection.childrenMap, inProgressSessionIds, topology.isVSCode, view.homeDirectory]);
   const standaloneGroups = React.useMemo<SessionGroup[]>(
     () => chatGroup ? [chatGroup] : EMPTY_STANDALONE_GROUPS,
     [chatGroup],
@@ -328,8 +346,9 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     }),
     [getOrderedGroups, sectionsForSidebarRender],
   );
-  const recentActivitySections = React.useMemo(() => {
-    const nodes = new Map(recentSessions.map((session) => [
+  // Recent and In progress share this row projection.
+  const deriveActivitySections = React.useCallback((sessions: Session[]) => {
+    const nodes = new Map(sessions.map((session) => [
       session.id, buildActiveSessionNode(collection.childrenMap, session),
     ]));
     const pending = [...nodes.values()];
@@ -350,19 +369,17 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       hideBranchMatchingProjectLabel: true,
     });
     return deriveRecentActivitySections({
-      sessions: recentSessions,
+      sessions,
       getSessionLocation: (sessionId) => locations.get(sessionId) ?? null,
       getSessionNode: (session) => nodes.get(session.id) ?? buildActiveSessionNode(collection.childrenMap, session),
       query: view.hasSessionSearchQuery ? view.normalizedSessionSearchQuery : '',
     });
-  }, [collection.childrenMap, ownership.bySessionId, recentSessions, topology.availableWorktreesByProject, topology.gitBranches, topology.projects, view.hasSessionSearchQuery, view.homeDirectory, view.normalizedSessionSearchQuery]);
+  }, [collection.childrenMap, ownership.bySessionId, topology.availableWorktreesByProject, topology.gitBranches, topology.projects, view.hasSessionSearchQuery, view.homeDirectory, view.normalizedSessionSearchQuery]);
+  const recentActivitySections = React.useMemo(() => deriveActivitySections(recentSessions), [deriveActivitySections, recentSessions]);
 
   // Timeline lists the project sessions themselves, in the shared lifecycle
   // order (pinned first), with no project, worktree, or folder structure.
-  const timelineItems = React.useMemo(() => {
-    if (!timelineMode) return EMPTY_TIMELINE_ITEMS;
-    const rootIds = new Set(collection.rootSessions.map((session) => session.id));
-    const sessions = collection.orderedSessions.filter((session) => rootIds.has(session.id) && !session.time?.archived);
+  const deriveTimelineItems = React.useCallback((sessions: Session[]) => {
     const locations = resolveSidebarSessionLocations({
       sessions,
       projects: topology.projects,
@@ -385,7 +402,17 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       }),
       query: view.hasSessionSearchQuery ? view.normalizedSessionSearchQuery : '',
     });
-  }, [collection.childrenMap, collection.orderedSessions, collection.rootSessions, ownership.bySessionId, timelineMode, topology.availableWorktreesByProject, topology.gitBranches, topology.projectRootBranches, topology.projects, view.hasSessionSearchQuery, view.homeDirectory, view.normalizedSessionSearchQuery]);
+  }, [collection.childrenMap, ownership.bySessionId, topology.availableWorktreesByProject, topology.gitBranches, topology.projectRootBranches, topology.projects, view.hasSessionSearchQuery, view.homeDirectory, view.normalizedSessionSearchQuery]);
+  const timelineItems = React.useMemo(() => {
+    if (!timelineMode) return EMPTY_TIMELINE_ITEMS;
+    const rootIds = new Set(collection.rootSessions.map((session) => session.id));
+    return deriveTimelineItems(collection.orderedSessions.filter((session) => rootIds.has(session.id) && !session.time?.archived && !inProgressSessionIds.has(session.id)));
+  }, [collection.orderedSessions, collection.rootSessions, deriveTimelineItems, inProgressSessionIds, timelineMode]);
+  // In progress rows match the surrounding view: timeline rows in the timeline, Recent rows otherwise.
+  const inProgressItems = React.useMemo(() => {
+    if (inProgressSessions.length === 0) return EMPTY_TIMELINE_ITEMS;
+    return timelineMode ? deriveTimelineItems(inProgressSessions) : deriveActivitySections(inProgressSessions)[0].items;
+  }, [deriveActivitySections, deriveTimelineItems, inProgressSessions, timelineMode]);
 
   const { groupStatusByKey, bootstrapSnapshot } = useSidebarGroupStatus({
     childStores,
@@ -513,6 +540,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     sections: orderedSectionsForRender,
     authoritativeSections: projectSections,
     chatGroup,
+    inProgressItems,
     recentSections: recentActivitySections,
     timelineItems,
     showRecentSection: showRecentSection && !singleProjectMode && !timelineMode,
@@ -535,7 +563,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     showOnlyMainWorkspace: view.showOnlyMainWorkspace,
     hideDirectoryControls: view.hideDirectoryControls,
     sessionBatchSize: singleProjectMode && !view.useGroupedSections ? 20 : undefined,
-  }), [chatGroup, collapsedActivityKeys, timelineItems, timelineMode, collapsedFolderIds, collection.pinnedSessionIds, expandedParents, folderAuthorityByOwner, foldersMap, groupSearchDataByGroup, groupStatusByKey, orderedSectionsForRender, projectSections, projectView.collapsedGroups, projectView.collapsedProjects, recentActivitySections, selectedSingleProjectId, sessionOrderIndex, showRecentSection, singleProjectMode, view.activeProjectId, view.hasSessionSearchQuery, view.hideDirectoryControls, view.normalizedSessionSearchQuery, view.showOnlyMainWorkspace, view.useGroupedSections, visibleCountByContainer]);
+  }), [chatGroup, collapsedActivityKeys, inProgressItems, timelineItems, timelineMode, collapsedFolderIds, collection.pinnedSessionIds, expandedParents, folderAuthorityByOwner, foldersMap, groupSearchDataByGroup, groupStatusByKey, orderedSectionsForRender, projectSections, projectView.collapsedGroups, projectView.collapsedProjects, recentActivitySections, selectedSingleProjectId, sessionOrderIndex, showRecentSection, singleProjectMode, view.activeProjectId, view.hasSessionSearchQuery, view.hideDirectoryControls, view.normalizedSessionSearchQuery, view.showOnlyMainWorkspace, view.useGroupedSections, visibleCountByContainer]);
   React.useEffect(() => {
     onSearchMatchCountChange(sidebarRowModel.searchMatchCount);
   }, [onSearchMatchCountChange, sidebarRowModel.searchMatchCount]);
