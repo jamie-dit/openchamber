@@ -86,8 +86,8 @@ buckets.
 In progress renders above every other zone, in both view modes and in the
 mobile sessions sheet. VS Code has none, and single-project display hides it
 outside the timeline, as it hides Recent. It lists non-archived root sessions from projects and managed
-Chats whose own turn or any active subagent is running, from the live
-`global-session-status` index. A session with a permission or question pending
+Chats by the row spinner's rule: their own turn or any subagent below them is
+running, from the live `global-session-status` index. A session with a permission or question pending
 on itself or a descendant, from `global-blocking-requests`, stays out: OpenCode
 keeps a parked execution active, but the user has to answer it. The section is
 hidden when empty. While a session runs it leaves Recent, Chats and the

@@ -910,7 +910,6 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
   const activityCandidates = React.useMemo(() => [...projectSessions, ...chatSessions], [chatSessions, projectSessions]);
   const inProgressSessions = useInProgressSessionCollection({
     enabled: presented,
-    childrenMap: childrenBySessionId,
     pinnedSessionIds,
     sessionOrderRanks,
     sessions: activityCandidates,

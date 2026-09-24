@@ -1,4 +1,5 @@
 import type { Session } from '@/lib/opencode/model';
+import { hasActiveSubagent } from '@/sync/global-session-status';
 import type { SessionNode } from '../types';
 import type { SidebarSessionLocation } from './sessionLocation';
 
@@ -71,31 +72,18 @@ export const deriveRecentSessions = (
   });
 };
 
-// Skips archived branches, unlike useSessionTurnActive's spinner rule (any active subagent).
-const subtreeHas = (
-  childrenMap: ReadonlyMap<string, readonly Session[]>,
-  session: Session,
-  sessionIds: ReadonlySet<string>,
-): boolean => {
-  if (sessionIds.has(session.id)) return true;
-  for (const child of childrenMap.get(session.id) ?? EMPTY_SESSIONS) {
-    if (!isArchivedSession(child) && subtreeHas(childrenMap, child, sessionIds)) return true;
-  }
-  return false;
-};
-
-// In progress: root sessions running themselves or through a subagent, unless waiting on the user.
+// In progress: root sessions the row spinner shows as running, unless they or a subagent wait on the user.
 export const deriveInProgressSessions = (
   sessions: readonly Session[],
   activeSessionIds: ReadonlySet<string>,
-  childrenMap: ReadonlyMap<string, readonly Session[]>,
   waitingSessionIds: ReadonlySet<string> = EMPTY_SESSION_IDS,
 ): Session[] => {
   if (activeSessionIds.size === 0) return EMPTY_SESSIONS;
   return sessions.filter((session) => !isArchivedSession(session)
     && !isSubtaskSession(session)
-    && subtreeHas(childrenMap, session, activeSessionIds)
-    && !subtreeHas(childrenMap, session, waitingSessionIds));
+    && (activeSessionIds.has(session.id) || hasActiveSubagent(session.id, activeSessionIds))
+    && !waitingSessionIds.has(session.id)
+    && !hasActiveSubagent(session.id, waitingSessionIds));
 };
 
 const attachRecentWorktrees = (

@@ -171,7 +171,6 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
   const inProgressSessions = useInProgressSessionCollection({
     // Hidden in single-project display, like Recent; the timeline ignores that display.
     enabled: !topology.isVSCode && (timelineMode || !singleProjectMode),
-    childrenMap: collection.childrenMap,
     pinnedSessionIds: collection.pinnedSessionIds,
     sessionOrderRanks: collection.sessionOrderRanks,
     sessions: activityCandidates,

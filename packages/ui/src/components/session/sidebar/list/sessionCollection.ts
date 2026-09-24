@@ -332,7 +332,6 @@ export const useSessionProjectCollection = ({
 
 type UseInProgressSessionCollectionArgs = {
   enabled: boolean;
-  childrenMap: ReadonlyMap<string, readonly Session[]>;
   pinnedSessionIds: Set<string>;
   sessionOrderRanks: ReadonlyMap<string, number>;
   /** Project roots plus managed Chats. */
@@ -345,7 +344,6 @@ const EMPTY_SESSIONS: Session[] = [];
 // Running comes from the live status index; waiting from the cross-directory blocking-request index.
 export const useInProgressSessionCollection = ({
   enabled,
-  childrenMap,
   pinnedSessionIds,
   sessionOrderRanks,
   sessions,
@@ -360,10 +358,10 @@ export const useInProgressSessionCollection = ({
   ));
   return React.useMemo(() => {
     if (!enabled) return EMPTY_SESSIONS;
-    const inProgress = deriveInProgressSessions(sessions, activeSessionIds, childrenMap, new Set(blockingBySession.keys()));
+    const inProgress = deriveInProgressSessions(sessions, activeSessionIds, new Set(blockingBySession.keys()));
     if (inProgress.length === 0) return EMPTY_SESSIONS;
     return orderSessionsByLifecycleScopes(inProgress, pinnedSessionIds, sessionOrderRanks);
-  }, [activeSessionIds, blockingBySession, childrenMap, enabled, pinnedSessionIds, sessionOrderRanks, sessions]);
+  }, [activeSessionIds, blockingBySession, enabled, pinnedSessionIds, sessionOrderRanks, sessions]);
 };
 
 type UseRecentSessionCollectionArgs = {

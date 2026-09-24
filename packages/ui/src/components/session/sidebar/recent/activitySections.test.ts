@@ -1,7 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import type { Session } from '@/lib/opencode/model';
 import type { WorktreeMetadata } from '@/types/worktree';
 import { getGitHubPrStatusKey } from '@/stores/useGitHubPrStatusStore';
+import { setSessionParentResolver } from '@/sync/global-session-status';
 import { resolveSessionPrLookupKey } from '../sessions/sessionNodeItemUtils';
 import { deriveInProgressSessions, deriveRecentActivitySections, deriveRecentSessions } from './activitySections';
 import { resolveSidebarSessionLocations } from './sessionLocation';
@@ -53,23 +54,30 @@ describe('deriveRecentSessions', () => {
 });
 
 describe('deriveInProgressSessions', () => {
+  // The spinner rule walks the global parent index, which the sync provider seeds in the app.
+  const seedParents = (...sessions: Session[]) => {
+    const parentById = new Map(sessions.map((record) => [record.id, record.parentID]));
+    setSessionParentResolver((sessionId) => parentById.get(sessionId) ?? undefined);
+  };
+  afterEach(() => setSessionParentResolver(() => undefined));
+
   test('lists a busy root and a root whose subagent is still running', () => {
     const busy = session('busy');
     const parent = session('parent');
     const subagent = session('subagent', { parentID: parent.id });
     const idle = session('idle');
+    seedParents(subagent);
 
-    expect(deriveInProgressSessions([busy, parent, subagent, idle], new Set([busy.id, subagent.id]), new Map([[parent.id, [subagent]]])))
-      .toEqual([busy, parent]);
+    expect(deriveInProgressSessions([busy, parent, subagent, idle], new Set([busy.id, subagent.id]))).toEqual([busy, parent]);
   });
 
-  test('ignores a running subagent below an archived child', () => {
+  test('lists a root whose running subagent sits under an archived child, like the row spinner', () => {
     const parent = session('parent');
     const archived = session('archived', { parentID: parent.id, archived: NOW - 1 });
     const grandchild = session('grandchild', { parentID: archived.id });
-    const childrenMap = new Map([[parent.id, [archived]], [archived.id, [grandchild]]]);
+    seedParents(archived, grandchild);
 
-    expect(deriveInProgressSessions([parent], new Set([archived.id, grandchild.id]), childrenMap)).toEqual([]);
+    expect(deriveInProgressSessions([parent], new Set([grandchild.id]))).toEqual([parent]);
   });
 
   test('leaves out a root waiting on the user, directly or through a descendant', () => {
@@ -78,12 +86,11 @@ describe('deriveInProgressSessions', () => {
     const parent = session('parent');
     const child = session('child', { parentID: parent.id });
     const grandchild = session('grandchild', { parentID: child.id });
-    const childrenMap = new Map([[parent.id, [child]], [child.id, [grandchild]]]);
+    seedParents(child, grandchild);
 
     expect(deriveInProgressSessions(
       [asking, working, parent],
       new Set([asking.id, working.id, parent.id]),
-      childrenMap,
       new Set([asking.id, grandchild.id]),
     )).toEqual([working]);
   });
@@ -92,7 +99,7 @@ describe('deriveInProgressSessions', () => {
     const archived = session('archived', { archived: NOW - 1 });
     const child = session('child', { parentID: 'parent' });
 
-    expect(deriveInProgressSessions([archived, child], new Set([archived.id, child.id]), new Map())).toEqual([]);
+    expect(deriveInProgressSessions([archived, child], new Set([archived.id, child.id]))).toEqual([]);
   });
 });
 
